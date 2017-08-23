@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html>
+	<head>
+		<title>Puck on a Plane</title>
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, user-scalable=no, minimum-scale=1.0, maximum-scale=1.0">
+		<style type="text/css">
+			body {
+				font-family: Monospace;
+				background-color: #f0f0f0;
+				margin: 0px;
+				padding: 0px;
+				overflow: hidden;
+			}
+		</style>
+	</head>
+	<body>
+		<script type="text/javascript" src="three.min.js"></script>
+		<script type="text/javascript" src="OrbitControls.js"></script>
+		<script type="text/javascript" src="Detector.js"></script>
+		<script type="text/javascript" src="stats.min.js"></script>
+		<script type="text/javascript" src="cannon.min.js"></script>
+		<script type="text/javascript" src="CannonDebugRenderer.js"></script>
+		<script type="text/javascript">
+			var tickCount = 0;
+			var container, stats, message, sequenceMessage = [];
+			var button1;
+			var t3Camera, t3Scene, t3Raycaster, t3Renderer, t3Controls;
+			var caWorld;
+			var cannonDebugThreeJsOutliner;
+			// Cannon.js (physics) convention has "Z" pointing up/down, "Y" pointing front/back and "X" left/right
+			// Three.js (graphics) convention has "Y" pointing up/down, "Z" pointing front/back and "X" left/right
+			// ... Let's go with Cannon and adjust Three.js as needed....Hmmmm - they have opposite "handed-ness" so...
+			// ... we'll stick with the cannon normal (+x=right,+y=closer,+z=up) and negate the Three.js y values.
+			// hence: +X is right, -X is left, +Y is closer, -Y is further, +Z is up, -Z is down
+			// >>>>>>!!!!!! It's turning out to be pretty hard to re-do Three.js axes....
+			// Let's try re-doing Cannon.js axes to match Three.js
+			// hence: +X is right, -X is left, +Y is up, -Y is down, +Z is closer, -Z is further
+			// ... to copy a CANNON body or shape quaternion to a THREE mesh quaternion:
+			//  ThreeMeshQuaternion.copy( CannonBodyOrShapeQuaternion.mult( CaToT3RotationQuaternion ) );
+			var CaToT3RotationQuaternion = new CANNON.Quaternion();
+			CaToT3RotationQuaternion.setFromAxisAngle( new CANNON.Vec3( 1, 0, 0 ), Math.PI/2 );
+			// ... and to go the other way - from a THREE mesh quaternion to a CANNON body or shape quaternion:
+			//  CannonBodyOrShapeQuaternion.copy( ThreeMeshQuaternion.multiply( T3ToCaRotationQuaternion ) );
+			var T3ToCaRotationQuaternion = new THREE.Quaternion();
+			T3ToCaRotationQuaternion.setFromAxisAngle( new THREE.Vector3( 1, 0, 0 ), -Math.PI/2 );
+			// ALSO, Cannon uses metric units and we want to remain somewhat human oriented so let's try centimeters for sizes
+			// (... note: leave the gravity setting at "9.8" because CANNON figures you're giving it METERS per second2)
+			// var t3cameraBearing; // in degrees, counter-clockwise from the +ve z-axis, looking down from the +ve y-axis
+			// var t3CameraElevation; // in degrees, up from the xz horizontal plane
+			// var t3CameraDistance; // in "world units" from the 0, 0, 0 point in world space
+			// var t3CameraLookAtPoint = new THREE.Vector2(); // the point on the ground plane where the camera centers
+			// var startingCameraBearing, startingCameraElevation, startingCameraDistance;
+			var startingTouchX, startingTouchY;
+			var touchPointerV2 = new THREE.Vector2();
+			var currentTouchPointerV3 = new THREE.Vector3();
+			var startingTouchPointerV3 = new THREE.Vector3();
+			var t3MoveToVector3 = new THREE.Vector3();
+			var t3PuckMesh, t3PlaneMesh;
+			var t3TouchableObjects = [];
+			var caPuckBody, caPlaneBody;
+			// create a cylinder to be our "puck" ( radiusTop{20}, radiusBottom{20}, height{100}, radiusSegments{8}, heightSegments{1}, openEnded{false} )
+			var puckRadius = 3;
+			var puckHeight = 1;
+			var puckStartingAltitude = 10;
+			var caPuckSpringConstraint, caPuckSpringHandle, t3ClickMarker;
+			// Control flow consists of two main functions: one to initialize everything and another to make it perform
+			init();
+			animate();
+			function init() {
+				// Create a div element to display our world on the browser screen
+				container = document.createElement( "div" );
+				container.id = "ctrid";
+				document.body.appendChild( container );
+				// create a Three.js scene to contain the model of our world
+				t3Scene = new THREE.Scene();
+				t3Scene.name = "t3Scene";
+				t3Scene.fog = new THREE.FogExp2( 0x085010, 0.0005 );
+				// create a Cannon.js world to provide the physics
+				caWorld = new CANNON.World();
+				caWorld.gravity.set( 0, -9.8, 0 ); // gravity in centimeters/sec2
+				caWorld.broadphase = new CANNON.NaiveBroadphase();
+				// Cannon debug to outline Cannon bodies in ThreeJs rendering
+				cannonDebugThreeJsOutliner = new THREE.CannonDebugRenderer( t3Scene, caWorld );
+				// create a camera with which we view our world
+				t3Camera = new THREE.PerspectiveCamera( 25, window.innerWidth / window.innerHeight, 1, 10000 );
+				t3Camera.name = "t3Camera";
+				t3Camera.position.z = 500;
+				t3Camera.position.y = 500;
+				// create THREE orbit controls to manage orientation, view, scale....
+				t3Controls = new THREE.OrbitControls( t3Camera );
+				t3Controls.name = "t3Controls";
+				t3Controls.damping = 0.2;
+				t3Controls.addEventListener( 'change', render );
+				// create a bright white light shining on our world from the front (+ve Y)
+				var frontLight = new THREE.DirectionalLight( 0xffffff, 1 );
+				frontLight.name = "frontLight";
+				frontLight.position.set( 1, 1, 1 );
+				t3Scene.add( frontLight );
+				// create a not-so-bright white light shining on our world from the rear (-ve Y)
+				var rearLight = new THREE.DirectionalLight( 0xffffff, 0.8 );
+				rearLight.name = "rearLight";
+				rearLight.position.set( -1, -1, -1);
+				t3Scene.add( rearLight );
+				// create an overhead point light to cast shadows (on faster processors only....)
+				var overheadLight = new THREE.SpotLight( 0xffffff );
+				overheadLight.name = "overheadLight";
+				overheadLight.position.set( 10, 100, 10 );
+				t3Scene.add( overheadLight );
+				// create a plane to be the "ground" of our world. Give it a horizontal extent of 1 meter by 1 meter
+				var t3PlaneGeometry = new THREE.PlaneGeometry( 100, 100 );
+				var t3PlaneMaterial = new THREE.MeshLambertMaterial( { color: 0x0ac020, side: THREE.DoubleSide } );
+				t3PlaneMesh = new THREE.Mesh( t3PlaneGeometry, t3PlaneMaterial );
+				t3PlaneMesh.name = 't3PlaneMesh';
+				// ThreeJs creates planes perpendicular to the z-axis so rotation is needed to make it horizontal (perpendicular to the y-axis)
+				t3PlaneMesh.rotation.x = Math.PI / 2;
+				t3Scene.add( t3PlaneMesh );
+				t3TouchableObjects.push( t3PlaneMesh );
+				var caPlaneShape = new CANNON.Box(new CANNON.Vec3( 45, 45, 1 ) );
+				var caPlaneMaterial = new CANNON.Material( "caPlaneMaterial" );
+				caPlaneBody = new CANNON.Body( { mass: 0, material: caPlaneMaterial } );
+				caPlaneBody.addShape( caPlaneShape );
+				caPlaneBody.quaternion.setFromAxisAngle( new CANNON.Vec3( 1, 0, 0 ), -Math.PI/2 );
+				caPlaneBody.position.set( 0, 0, 0 );
+				caWorld.add( caPlaneBody );
+				// add an axis indicator to show the center and orientation our world
+				var axes = new THREE.AxisHelper(10);
+				t3Scene.add(axes);
+				var t3PuckGeometry = new THREE.CylinderGeometry( puckRadius * 0.8, puckRadius, puckHeight, 32 );
+				var t3PuckMaterial = new THREE.MeshLambertMaterial( { color: 0x854015 } );
+				t3PuckMesh = new THREE.Mesh( t3PuckGeometry, t3PuckMaterial );
+				t3PuckMesh.name = 't3PuckMesh';
+				t3Scene.add( t3PuckMesh );
+				t3TouchableObjects.push( t3PuckMesh );
+				var caPuckMaterial = new CANNON.Material( "caPuckMaterial" );
+				var caPuckShape = new CANNON.Cylinder( puckRadius * 0.8, puckRadius, puckHeight, 32 );
+				caPuckBody = new CANNON.Body( { mass: 10, material: caPuckMaterial } );
+				caPuckBody.addShape( caPuckShape );
+				caPuckBody.linearDamping = 0.1;
+				caPuckBody.rotationalDamping = 0.1;
+				fetchPuck();
+				caPuckBody.quaternion.copy( t3PuckMesh.quaternion.multiply( T3ToCaRotationQuaternion ) );
+				caWorld.add( caPuckBody );
+				var caPuckPlaneContactMaterial = new CANNON.ContactMaterial( caPlaneMaterial, caPuckMaterial, { friction: 0.1, restitution: 0.8 } );
+				caWorld.addContactMaterial( caPuckPlaneContactMaterial );
+				// create a spring handle to give the touch or mouse click something to grab to drag the puck around
+				var caPuckSpringHandleShape = new CANNON.Sphere( 0.1 );
+				caPuckSpringHandle = new CANNON.Body( { mass: 0 } );
+				caPuckSpringHandle.addShape( caPuckSpringHandleShape );
+				caPuckSpringHandle.collisionFilterGroup = 0; // (so this handle won't have collisions with any of the other stuff in the caWorld)
+				caPuckSpringHandle.collisionFilterMask = 0;
+				caWorld.add( caPuckSpringHandle );
+				// create a sphere to show the location of the handle end of the spring
+				var clickMarkerShape = new THREE.SphereGeometry( 1 );
+				var clickMarkerMaterial = new THREE.MeshLambertMaterial( { color: 0xff0000 } );
+				t3ClickMarker = new THREE.Mesh( clickMarkerShape, clickMarkerMaterial );
+				t3ClickMarker.name = "t3ClickMarker";
+				t3Scene.add( t3ClickMarker );
+				t3ClickMarker.visible = false;
+				// create a raycaster to determine where in our world any touch gestures on the screen are pointing
+				t3Raycaster = new THREE.Raycaster();
+				// create a renderer to paint the camera's view of our world scene onto the browser display element
+				t3Renderer = new THREE.WebGLRenderer();
+				t3Renderer.setClearColor( 0xf0f0f0 );
+				t3Renderer.shadowMapEnabled = true;
+				t3Renderer.setPixelRatio( window.devicePixelRatio );
+				t3Renderer.setSize( window.innerWidth, window.innerHeight );
+				t3Renderer.sortObjects = false;
+				container.appendChild( t3Renderer.domElement );
+				// create a little window to show actual rendering/animation speed. 60 frames per second is full speed - lower means the browser/processer is laboring.
+				stats = new Stats();
+				stats.domElement.style.position = "absolute";
+				stats.domElement.style.top = "0px";
+				container.appendChild( stats.domElement );
+				// create a button to toggle touch/mouse response between t3 orbit controls and our internal behavior
+				button1 = document.createElement( "div" );
+				button1.id = "button1id";
+				button1.style.cssText = "position:absolute;width:90px;height:50px;opacity:0.9;cursor:pointer;top:10px;right:10px;zIndex:5;background-color:#f44";
+				button1.innerHTML = "Fetch puck";
+				document.body.appendChild( button1 );
+				button1.addEventListener( "mousedown", onButtonMouseDown, false );
+				button1.addEventListener( "touchstart", onButtonTouchStart, false );
+
+				// create another little window to allow me to display information to myself during development
+				message = document.createElement( "div" );
+				document.body.appendChild( message );
+				message.style.position = "absolute";
+				message.style.top = "0px";
+				message.style.left = "100px";
+				message.style.width = "800px";
+				message.style.height = "100px";
+				message.style.zIndex = "10";
+				// arrange to adjust visible scene as needed should the browser window size or orientation change
+				window.addEventListener( "resize", onWindowResize, false );
+				// hook into the operating system's gesture response
+				document.addEventListener( "touchstart", onTouchStart, false );
+				document.addEventListener( "touchmove", onTouchMove, false );
+				document.addEventListener( "touchend", onTouchEnd, false );
+				document.addEventListener( "mousedown", onMouseDown, false );
+				document.addEventListener( "mousemove", onMouseMove, false );
+				document.addEventListener( "mouseup", onMouseUp, false );
+			}
+			function debugDeclare( message ) {
+				console.log( message );
+				alert( message );
+			}
+			function fetchPuck() {
+				caPuckBody.position.set( 3, puckHeight/2 + puckStartingAltitude, 5 );
+			}
+			function onButtonTouchStart( event ) {
+				fetchPuck();
+			}
+			function onButtonMouseDown( event ) {
+				fetchPuck();
+			}
+			// Respond to touch events
+			function onTouchStart( event ) {
+				event.preventDefault();
+				switch( event.targetTouches.length ) {
+					case 1:
+						// one-finger touch needs further consideration
+						console.log( "onTouchStart(1) ..." );
+						processSingleTouchOrClickStart( ( event.touches[0].pageX / window.innerWidth ) * 2 - 1, - ( event.touches[0].pageY / window.innerHeight ) * 2 + 1 );
+						break;
+					default:
+						// for 2 or more fingers, we yield to the THREE.JS orbit control process
+						console.log( "onTouchStart( >1 ) - state => t3yielded" );
+						break;
+				}
+			}
+			function onTouchMove( event ) {
+				event.preventDefault();
+				processSingleTouchOrClickMove( ( event.touches[0].pageX / window.innerWidth ) * 2 - 1, - ( event.touches[0].pageY / window.innerHeight ) * 2 + 1 );
+			}
+			function onTouchEnd( event ) {
+				event.preventDefault();
+				console.log( "onTouchEnd" );
+				processTouchOrClickEnd();
+			}
+			// Respond to mouse events
+			function onMouseDown( event ) {
+				console.log( "onMouseDown" );
+				processSingleTouchOrClickStart( ( event.clientX / window.innerWidth ) * 2 - 1, - ( event.clientY / window.innerHeight ) * 2 + 1 );
+			}
+			function onMouseMove( event ) {
+				processSingleTouchOrClickMove( ( event.clientX / window.innerWidth ) * 2 - 1, - ( event.clientY / window.innerHeight ) * 2 + 1 );
+			}
+			function onMouseUp( event ) {
+				console.log( "onMouseUp" );
+				processTouchOrClickEnd();
+			}
+			function processSingleTouchOrClickStart( eventX, eventY ) {
+				touchPointerV2.x = eventX;
+				touchPointerV2.y = eventY;
+				t3Raycaster.setFromCamera( touchPointerV2, t3Camera );
+				var t3TouchIntersects = t3Raycaster.intersectObjects( t3TouchableObjects );
+				if ( t3TouchIntersects.length > 0 ) {
+					if ( t3TouchIntersects[ 0 ].object === t3PlaneMesh ) {
+						// terrain is touched => orbit (which is the 1-finger variant of "t3yielded")
+						console.log( "start orbiting");
+					} else if( t3TouchIntersects[ 0 ].object === t3PuckMesh ) {
+						// puck is touched => moving or flying
+						if( puckIsTouchingTerrain() ) {
+							console.log( "start moving" );
+							startClickMarker( t3TouchIntersects[ 0 ].point );
+						} else {
+							console.log( "start flying" );
+							startClickMarker( t3TouchIntersects[ 0 ].point );
+						}
+						t3Controls.enabled = false;
+					} else {
+						// some other object is touched => ??
+						console.log( "unknown touch intersection:" );
+						console.log( t3TouchIntersects[ 0 ].object );
+					}
+				} else {
+					// this click didn't intersect any object
+					console.log( "start flying" );
+				}
+			}
+			function puckIsTouchingTerrain() {
+				// Return true if puck is essentially "on" the terrain
+				return false;
+			}
+			function processSingleTouchOrClickMove( eventX, eventY ) {
+				// determine user's finger location on the terrain
+				touchPointerV2.x = eventX;
+				touchPointerV2.y = eventY;
+				t3Raycaster.setFromCamera( touchPointerV2, t3Camera );
+				var terrainIntersects = t3Raycaster.intersectObjects( t3TouchableObjects );
+				if ( terrainIntersects.length > 0 ) {
+					for( var i = 0; i < terrainIntersects.length; i++ ) {
+						if ( terrainIntersects[ i ].object === t3PlaneMesh ) {
+							// IF the pointer IS intersecting our terrain....
+							// Convert the pointer into a point on our terrain
+							t3MoveToVector3 = terrainIntersects[ i ].point;
+							// ... well, a bit ABOVE out terrain....
+							t3MoveToVector3.y += puckHeight;
+							// Move the THREE visible marker to that point
+							t3ClickMarker.position.copy( t3MoveToVector3 );
+							// Move the CANNON constraint handle to that point
+							caPuckSpringHandle.position.copy( t3MoveToVector3 );
+						}
+					}
+				}
+			}
+			function processTouchOrClickEnd() {
+				releasePuck();
+				t3Controls.enabled = true;
+			}
+			function releasePuck() {
+				clearClickMarker();
+			}
+			// Start a time-driven timer that ticks 10 times per second
+			function initializeTimerTick(){
+				tickInterval = setInterval( function(){ timerTick(); }, 100 );
+			}
+			function timerTick(){
+				tickCount++;
+			}
+			function onWindowResize() {
+				t3Camera.aspect = window.innerWidth / window.innerHeight;
+				t3Camera.updateProjectionMatrix();
+				t3Renderer.setSize( window.innerWidth, window.innerHeight );
+				render();
+			}
+			function animate() {
+				requestAnimationFrame( animate );
+				t3Controls.update();
+				processPhysics();
+				cannonDebugThreeJsOutliner.update();
+				render();
+				stats.update();
+			}
+			function processPhysics() {
+				var timeStep = 1 / 60;
+				caWorld.step( timeStep );
+				t3PuckMesh.position.x = caPuckBody.position.x;
+				t3PuckMesh.position.y = caPuckBody.position.y;
+				t3PuckMesh.position.z = caPuckBody.position.z;
+				t3PuckMesh.quaternion.copy( caPuckBody.quaternion.mult( CaToT3RotationQuaternion ) );
+			}
+			function render() {
+				t3Renderer.render( t3Scene, t3Camera );
+			}
+			function appendToSequenceMessage( nextEvent ) {
+				if ( ( sequenceMessage.length > 0 ) && ( sequenceMessage[ sequenceMessage.length - 1 ] === nextEvent ) ) return;
+				sequenceMessage.push( nextEvent );
+				if ( sequenceMessage.length > 10 ) sequenceMessage.shift();
+				var sequenceMessageText = "... ";
+				for ( var i = 0; i < sequenceMessage.length; i++ )
+					sequenceMessageText += ( " " + sequenceMessage[ i ] );
+				message.innerHTML = sequenceMessageText;
+			}
+			function showQuats( Comment, Q1name, Q2name, Q1, Q2 ) {
+				alert(Comment + ": " + Q1name + "-" + Q2name + "{w, x, y, z}: {" + Q1.w + ", " + Q1.x + ", " + Q1.y
+					+ ", " + Q1.z + "} {" + Q2.w + ", " + Q2.x + ", " + Q2.y + ", " + Q2.z + "}");
+			}
+			function startClickMarker( v3MarkerLocation ) {
+				t3ClickMarker.position.copy( v3MarkerLocation );
+				t3ClickMarker.visible = true;
+				t3PuckMesh.material.emissive.setHex( 0xffff00 );
+				var puckPivot = new CANNON.Vec3( 0, 0, puckHeight / 2 );
+				var markerPivot = new CANNON.Vec3( 0, 0, 0 );
+				var maxForce = 1E5;
+				caPuckSpringConstraint = new CANNON.PointToPointConstraint( caPuckBody, puckPivot, caPuckSpringHandle, markerPivot, maxForce );
+				caWorld.addConstraint( caPuckSpringConstraint );
+			}
+			function moveClickMarker( v3MarkerLocation ) {
+				t3ClickMarker.position.copy( v3MarkerLocation );
+				caPuckSpringHandle.position.copy( v3MarkerLocation );
+				caPuckSpringConstraint.update();
+			}
+			function clearClickMarker() {
+				t3ClickMarker.visible = false;
+				t3PuckMesh.material.emissive.setHex( 0x000000 );
+				caWorld.removeConstraint( caPuckSpringConstraint );
+				caPuckSpringConstraint = false;
+			}
+		</script>
+	</body>
+</html>
